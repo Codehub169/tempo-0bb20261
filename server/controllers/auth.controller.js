@@ -1,6 +1,6 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const db = require('../database/db'); // Using direct DB access for now
+const User = require('../models/User');
 
 // @desc    Register a new user
 // @route   POST /api/auth/register
@@ -18,51 +18,44 @@ exports.register = async (req, res) => {
     if (!['candidate', 'employer'].includes(role)) {
         return res.status(400).json({ message: 'Invalid role specified.' });
     }
+    if (password.length < 6) {
+        return res.status(400).json({ message: 'Password must be at least 6 characters long.' });
+    }
 
     try {
-        // Check if user already exists
-        const existingUser = await new Promise((resolve, reject) => {
-            db.get('SELECT email FROM users WHERE email = ?', [email], (err, row) => {
-                if (err) reject(err);
-                resolve(row);
-            });
-        });
-
+        const existingUser = await User.findByEmail(email);
         if (existingUser) {
             return res.status(400).json({ message: 'User with this email already exists.' });
         }
 
-        // Hash password
-        const salt = await bcrypt.genSalt(10);
-        const hashedPassword = await bcrypt.hash(password, salt);
-
-        // Insert user into database (using direct DB for now, replace with Model later)
-        const sql = 'INSERT INTO users (email, password, role, company_name) VALUES (?, ?, ?, ?)';
-        const params = [email, hashedPassword, role, role === 'employer' ? companyName : null];
-        
-        const result = await new Promise((resolve, reject) => {
-            db.run(sql, params, function(err) {
-                if (err) reject(err);
-                resolve({ id: this.lastID });
-            });
+        const newUser = await User.create({
+            email,
+            password,
+            role,
+            companyName: role === 'employer' ? companyName : null
         });
 
         // Create and sign JWT
-        const payload = { user: { id: result.id, role: role } };
-        const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRES_IN || '1h' });
+        const payload = { user: { id: newUser.id, role: newUser.role } };
+        const token = jwt.sign(payload, process.env.JWT_SECRET, {
+            expiresIn: process.env.JWT_EXPIRES_IN || '1h'
+        });
 
         res.status(201).json({
             token,
             user: {
-                id: result.id,
-                email: email,
-                role: role,
-                companyName: role === 'employer' ? companyName : undefined
+                id: newUser.id,
+                email: newUser.email,
+                role: newUser.role,
+                companyName: newUser.companyName // companyName might be null if not employer
             }
         });
 
     } catch (error) {
         console.error('Register error:', error.message);
+        if (error.message.includes('Email already exists')) { // From User.create model validation
+             return res.status(400).json({ message: error.message });
+        }
         res.status(500).json({ message: 'Server error during registration.' });
     }
 };
@@ -78,27 +71,22 @@ exports.login = async (req, res) => {
     }
 
     try {
-        // Check for user
-        const user = await new Promise((resolve, reject) => {
-            db.get('SELECT * FROM users WHERE email = ?', [email], (err, row) => {
-                if (err) reject(err);
-                resolve(row);
-            });
-        });
-
+        const user = await User.findByEmail(email);
         if (!user) {
             return res.status(400).json({ message: 'Invalid credentials.' });
         }
 
-        // Check password
         const isMatch = await bcrypt.compare(password, user.password);
         if (!isMatch) {
             return res.status(400).json({ message: 'Invalid credentials.' });
         }
 
         // Create and sign JWT
-        const payload = { user: { id: user.id, role: user.role } };
-        const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRES_IN || '1h' });
+        // The payload structure here { id: user.id, role: user.role } is what authenticateToken middleware will place in req.user
+        const payload = { id: user.id, role: user.role }; 
+        const token = jwt.sign(payload, process.env.JWT_SECRET, {
+            expiresIn: process.env.JWT_EXPIRES_IN || '1h'
+        });
 
         res.json({
             token,
@@ -106,7 +94,7 @@ exports.login = async (req, res) => {
                 id: user.id,
                 email: user.email,
                 role: user.role,
-                companyName: user.company_name
+                companyName: user.company_name // User model findByEmail returns company_name
             }
         });
 

@@ -1,9 +1,9 @@
-const db = require('../database/db');
+const Job = require('../models/Job');
 
 // Controller to create a new job posting
 exports.createJob = async (req, res) => {
     const { title, description, company_name, location, job_type, salary_range } = req.body;
-    const employer_id = req.user.userId;
+    const employerId = req.user.id; // Corrected: use req.user.id
 
     if (req.user.role !== 'employer') {
         return res.status(403).json({ message: 'Forbidden: Only employers can post jobs.' });
@@ -13,21 +13,17 @@ exports.createJob = async (req, res) => {
         return res.status(400).json({ message: 'Missing required fields: title, description, company_name, location.' });
     }
 
-    const sql = `INSERT INTO jobs (employer_id, title, description, company_name, location, job_type, salary_range) 
-                 VALUES (?, ?, ?, ?, ?, ?, ?)`;
-    const params = [employer_id, title, description, company_name, location, job_type, salary_range];
-
     try {
-        const result = await new Promise((resolve, reject) => {
-            db.run(sql, params, function (err) {
-                if (err) {
-                    reject(err);
-                } else {
-                    resolve(this);
-                }
-            });
+        const newJob = await Job.create({
+            employerId,
+            title,
+            description,
+            companyName: company_name, // Map to model's expected camelCase
+            location,
+            jobType: job_type, // Map to model's expected camelCase
+            salaryRange: salary_range // Map to model's expected camelCase
         });
-        res.status(201).json({ message: 'Job created successfully', jobId: result.lastID, employer_id, title, company_name, location });
+        res.status(201).json({ message: 'Job created successfully', job: newJob });
     } catch (error) {
         console.error('Error creating job:', error.message);
         res.status(500).json({ message: 'Error creating job', error: error.message });
@@ -36,18 +32,9 @@ exports.createJob = async (req, res) => {
 
 // Controller to get all job postings (public)
 exports.getAllJobs = async (req, res) => {
-    const sql = "SELECT j.id, j.title, j.company_name, j.location, j.job_type, j.salary_range, j.posted_at, u.email as employer_email FROM jobs j JOIN users u ON j.employer_id = u.id ORDER BY j.posted_at DESC";
     try {
-        const rows = await new Promise((resolve, reject) => {
-            db.all(sql, [], (err, rows) => {
-                if (err) {
-                    reject(err);
-                } else {
-                    resolve(rows);
-                }
-            });
-        });
-        res.status(200).json(rows);
+        const jobs = await Job.findAll(true); // includeEmployerDetails = true
+        res.status(200).json(jobs);
     } catch (error) {
         console.error('Error fetching jobs:', error.message);
         res.status(500).json({ message: 'Error fetching jobs', error: error.message });
@@ -56,24 +43,15 @@ exports.getAllJobs = async (req, res) => {
 
 // Controller to get job postings by a specific employer
 exports.getJobsByEmployer = async (req, res) => {
-    const employer_id = req.user.userId;
+    const employerId = req.user.id; // Corrected: use req.user.id
 
     if (req.user.role !== 'employer') {
         return res.status(403).json({ message: 'Forbidden: Only employers can view their own job postings.' });
     }
 
-    const sql = "SELECT * FROM jobs WHERE employer_id = ? ORDER BY posted_at DESC";
     try {
-        const rows = await new Promise((resolve, reject) => {
-            db.all(sql, [employer_id], (err, rows) => {
-                if (err) {
-                    reject(err);
-                } else {
-                    resolve(rows);
-                }
-            });
-        });
-        res.status(200).json(rows);
+        const jobs = await Job.findByEmployerId(employerId);
+        res.status(200).json(jobs);
     } catch (error) {
         console.error('Error fetching employer jobs:', error.message);
         res.status(500).json({ message: 'Error fetching employer jobs', error: error.message });
@@ -83,19 +61,10 @@ exports.getJobsByEmployer = async (req, res) => {
 // Controller to get a single job posting by ID (public)
 exports.getJobById = async (req, res) => {
     const { id } = req.params;
-    const sql = "SELECT j.*, u.email as employer_email, u.company_name as employer_profile_company_name FROM jobs j JOIN users u ON j.employer_id = u.id WHERE j.id = ?";
     try {
-        const row = await new Promise((resolve, reject) => {
-            db.get(sql, [id], (err, row) => {
-                if (err) {
-                    reject(err);
-                } else {
-                    resolve(row);
-                }
-            });
-        });
-        if (row) {
-            res.status(200).json(row);
+        const job = await Job.findById(id, true); // includeEmployerDetails = true
+        if (job) {
+            res.status(200).json(job);
         } else {
             res.status(404).json({ message: 'Job not found' });
         }
@@ -108,60 +77,46 @@ exports.getJobById = async (req, res) => {
 // Controller to update a job posting
 exports.updateJob = async (req, res) => {
     const { id } = req.params;
-    const { title, description, company_name, location, job_type, salary_range } = req.body;
-    const employer_id = req.user.userId;
+    const employerId = req.user.id; // Corrected: use req.user.id
 
     if (req.user.role !== 'employer') {
         return res.status(403).json({ message: 'Forbidden: Only employers can update jobs.' });
     }
 
-    if (!title || !description || !company_name || !location) {
-        return res.status(400).json({ message: 'Missing required fields for update.' });
-    }
-
-    // First, verify the job exists and belongs to the employer
-    const checkSql = "SELECT employer_id FROM jobs WHERE id = ?";
     try {
-        const job = await new Promise((resolve, reject) => {
-            db.get(checkSql, [id], (err, row) => {
-                if (err) reject(err);
-                else resolve(row);
-            });
-        });
-
-        if (!job) {
+        const existingJob = await Job.findById(id);
+        if (!existingJob) {
             return res.status(404).json({ message: 'Job not found.' });
         }
-        if (job.employer_id !== employer_id) {
+        if (existingJob.employer_id !== employerId) {
             return res.status(403).json({ message: 'Forbidden: You do not own this job posting.' });
         }
 
-        // Proceed with update
-        const updateSql = `UPDATE jobs SET 
-                           title = COALESCE(?, title), 
-                           description = COALESCE(?, description), 
-                           company_name = COALESCE(?, company_name), 
-                           location = COALESCE(?, location), 
-                           job_type = COALESCE(?, job_type), 
-                           salary_range = COALESCE(?, salary_range) 
-                           WHERE id = ? AND employer_id = ?`;
-        const params = [title, description, company_name, location, job_type, salary_range, id, employer_id];
+        // Prepare data for update, merging existing with new from req.body
+        // req.body might provide snake_case, model's update method expects camelCase keys.
+        // existingJob has snake_case keys from DB (e.g., existingJob.company_name)
+        const updatedDataForModel = {
+            title: req.body.title !== undefined ? req.body.title : existingJob.title,
+            description: req.body.description !== undefined ? req.body.description : existingJob.description,
+            companyName: req.body.company_name !== undefined ? req.body.company_name : existingJob.company_name,
+            location: req.body.location !== undefined ? req.body.location : existingJob.location,
+            jobType: req.body.job_type !== undefined ? req.body.job_type : existingJob.job_type,
+            salaryRange: req.body.salary_range !== undefined ? req.body.salary_range : existingJob.salary_range
+        };
         
-        const result = await new Promise((resolve, reject) => {
-            db.run(updateSql, params, function(err) {
-                if (err) reject(err);
-                else resolve(this);
-            });
-        });
-
-        if (result.changes === 0) {
-            // This case should ideally be caught by the ownership check above, but as a fallback.
-            return res.status(404).json({ message: 'Job not found or no changes made.' });
+        // Validation for core fields if they are being explicitly set to empty (or not provided from an empty body)
+        if (updatedDataForModel.title === undefined || updatedDataForModel.description === undefined || updatedDataForModel.companyName === undefined || updatedDataForModel.location === undefined) {
+             return res.status(400).json({ message: 'Title, description, company name, and location are required.' });
         }
-        res.status(200).json({ message: 'Job updated successfully', jobId: id });
+
+        const updatedJob = await Job.update(id, updatedDataForModel);
+        res.status(200).json({ message: 'Job updated successfully', job: updatedJob });
 
     } catch (error) {
         console.error('Error updating job:', error.message);
+        if (error.message.includes('Job not found or no changes made')) { // From Model
+            return res.status(404).json({ message: error.message });
+        }
         res.status(500).json({ message: 'Error updating job', error: error.message });
     }
 };
@@ -169,43 +124,28 @@ exports.updateJob = async (req, res) => {
 // Controller to delete a job posting
 exports.deleteJob = async (req, res) => {
     const { id } = req.params;
-    const employer_id = req.user.userId;
+    const employerId = req.user.id; // Corrected: use req.user.id
 
     if (req.user.role !== 'employer') {
         return res.status(403).json({ message: 'Forbidden: Only employers can delete jobs.' });
     }
 
-    // Verify ownership before deleting
-    const checkSql = "SELECT employer_id FROM jobs WHERE id = ?";
     try {
-        const job = await new Promise((resolve, reject) => {
-            db.get(checkSql, [id], (err, row) => {
-                if (err) reject(err);
-                else resolve(row);
-            });
-        });
-
+        const job = await Job.findById(id);
         if (!job) {
             return res.status(404).json({ message: 'Job not found.' });
         }
-        if (job.employer_id !== employer_id) {
+        if (job.employer_id !== employerId) {
             return res.status(403).json({ message: 'Forbidden: You do not own this job posting.' });
         }
 
-        // Proceed with deletion
-        const deleteSql = "DELETE FROM jobs WHERE id = ? AND employer_id = ?";
-        const result = await new Promise((resolve, reject) => {
-            db.run(deleteSql, [id, employer_id], function(err) {
-                if (err) reject(err);
-                else resolve(this);
-            });
-        });
-
-        if (result.changes === 0) {
-            return res.status(404).json({ message: 'Job not found or already deleted.' });
+        const deleted = await Job.delete(id);
+        if (deleted) {
+            res.status(200).json({ message: 'Job deleted successfully', jobId: id });
+        } else {
+            // Should be caught by job existence check, but as a fallback
+            res.status(404).json({ message: 'Job not found or already deleted.' });
         }
-        res.status(200).json({ message: 'Job deleted successfully', jobId: id });
-
     } catch (error) {
         console.error('Error deleting job:', error.message);
         res.status(500).json({ message: 'Error deleting job', error: error.message });
